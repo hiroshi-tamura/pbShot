@@ -29,4 +29,6 @@ public:
 
     static bool autostart();
     static void setAutostart(bool enable);
+
+    static void ensureInitialized();
 };

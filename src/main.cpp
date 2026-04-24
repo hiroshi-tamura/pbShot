@@ -1,6 +1,8 @@
 #include <QApplication>
 #include <QIcon>
+#include <QSettings>
 #include "TrayApp.h"
+#include "Settings.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -27,6 +29,15 @@ int main(int argc, char* argv[]) {
     QApplication::setOrganizationName("pb");
     QApplication::setQuitOnLastWindowClosed(false);
     app.setWindowIcon(QIcon(":/icons/app.png"));
+
+    // 旧バージョンで HKCU\Software\pb\pbShot に書き込まれていた設定を掃除する（初回のみ）
+    {
+        QSettings legacy("pb", "pbShot");
+        if (!legacy.allKeys().isEmpty()) legacy.clear();
+    }
+
+    // exe 隣に pbShot.ini / Screenshots / Cache を用意
+    Settings::ensureInitialized();
 
     TrayApp tray;
     if (!tray.start()) {

@@ -1,6 +1,5 @@
 #include "Settings.h"
 #include <QSettings>
-#include <QStandardPaths>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -8,13 +7,15 @@
 #include <QCoreApplication>
 
 static QSettings& s() {
-    static QSettings st("pb", "pbShot");
+    // exe と同じフォルダに pbShot.ini を置く（レジストリや他フォルダを汚さない）
+    static QSettings st(
+        QCoreApplication::applicationDirPath() + "/pbShot.ini",
+        QSettings::IniFormat);
     return st;
 }
 
 QString Settings::saveDir() {
-    QString def = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)
-                  + "/pbShot";
+    QString def = QCoreApplication::applicationDirPath() + "/Screenshots";
     QString d = s().value("saveDir", def).toString();
     QDir().mkpath(d);
     return d;
@@ -42,6 +43,18 @@ QString Settings::cacheDir() {
     QString d = s().value("cacheDir", def).toString();
     QDir().mkpath(d);
     return d;
+}
+
+// 自動起動キーだけは Windows 仕様上 HKCU\...\Run に書く必要があるため例外。
+// それ以外の設定は exe 隣の pbShot.ini に集約している。
+
+void Settings::ensureInitialized() {
+    saveDir();   // mkpath
+    cacheDir();  // mkpath
+    if (!s().contains("configVersion")) {
+        s().setValue("configVersion", 1);
+        s().sync();
+    }
 }
 void Settings::setCacheDir(const QString& dir) { s().setValue("cacheDir", dir); }
 QString Settings::nextCacheFilename() {
