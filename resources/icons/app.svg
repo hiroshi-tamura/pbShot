@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect x="8" y="8" width="240" height="240" rx="40" fill="#1e2838"/>
+  <rect x="8" y="8" width="240" height="240" rx="40" fill="url(#g)" opacity="0.35"/>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4aa8ff"/>
+      <stop offset="1" stop-color="#1e2838"/>
+    </linearGradient>
+  </defs>
+  <!-- camera body -->
+  <rect x="48" y="80" width="160" height="112" rx="14" fill="#f4f6fa"/>
+  <rect x="88" y="62" width="80" height="24" rx="6" fill="#f4f6fa"/>
+  <!-- lens -->
+  <circle cx="128" cy="140" r="38" fill="#1e2838"/>
+  <circle cx="128" cy="140" r="28" fill="#4aa8ff"/>
+  <circle cx="118" cy="130" r="8" fill="#ffffff" opacity="0.7"/>
+  <!-- crop corners -->
+  <g stroke="#ff4f4f" stroke-width="6" fill="none" stroke-linecap="round">
+    <path d="M28 52 L28 28 L52 28"/>
+    <path d="M228 52 L228 28 L204 28"/>
+    <path d="M28 204 L28 228 L52 228"/>
+    <path d="M228 204 L228 228 L204 228"/>
+  </g>
+</svg>
