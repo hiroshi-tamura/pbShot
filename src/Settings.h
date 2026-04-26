@@ -24,6 +24,9 @@ public:
     static void setCacheMaxSizeMB(int mb);
     static void pruneCache();
 
+    // OCR モデル: exe 隣の models/ フォルダ（ポータブル）
+    static QString modelsDir();
+
     static int  imageQuality();
     static void setImageQuality(int q);
 

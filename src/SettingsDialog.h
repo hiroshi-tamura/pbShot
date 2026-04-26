@@ -6,6 +6,8 @@ class QKeySequenceEdit;
 class QComboBox;
 class QCheckBox;
 class QSpinBox;
+class QLabel;
+class QPushButton;
 
 class SettingsDialog : public QDialog {
     Q_OBJECT
@@ -18,6 +20,8 @@ private slots:
     void accept() override;
 
 private:
+    void updateOcrModelStatus();
+
     QLineEdit*         m_saveDir = nullptr;
     QLineEdit*         m_cacheDir = nullptr;
     QKeySequenceEdit*  m_hkRegion = nullptr;
@@ -27,4 +31,10 @@ private:
     QCheckBox*         m_autostart = nullptr;
     QSpinBox*          m_quality = nullptr;
     QSpinBox*          m_cacheMaxMB = nullptr;
+
+    // OCR モデル
+    QLabel*            m_ocrStatus = nullptr;
+    QPushButton*       m_ocrDownloadBtn = nullptr;
+    QPushButton*       m_ocrRemoveBtn = nullptr;
+    QPushButton*       m_ocrOpenDirBtn = nullptr;
 };

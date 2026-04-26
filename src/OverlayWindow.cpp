@@ -2,6 +2,9 @@
 #include "EditToolbar.h"
 #include "ActionToolbar.h"
 #include "Settings.h"
+#include "Ocr.h"
+#include "OcrModelManager.h"
+#include "Toast.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -21,6 +24,13 @@
 #include <QDateTime>
 #include <QTextStream>
 #include <QDebug>
+#include <QMessageBox>
+#include <QSystemTrayIcon>
+#include <QPointer>
+#include <QProgressDialog>
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
+#include <QPair>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -127,6 +137,9 @@ OverlayWindow::OverlayWindow(const QPixmap& shot, const QRect& virtualRectLogica
             emit finished();
             close();
         }
+    });
+    connect(m_actionBar, &ActionToolbar::ocrRequested, this, [this](){
+        runOcrAndCopy();
     });
     connect(m_actionBar, &ActionToolbar::saveRequested,  this, [this](){
         if (saveImageToDisk(true)) {
@@ -704,4 +717,125 @@ bool OverlayWindow::copyPathViaCache() {
     QString nativePath = QDir::toNativeSeparators(path);
     QGuiApplication::clipboard()->setText(nativePath);
     return true;
+}
+
+void OverlayWindow::runOcrAndCopy() {
+    QPixmap img = composeFinalImage();
+    if (img.isNull()) return;
+    QImage qimg = img.toImage();
+
+    auto* models = Ocr::instance().models();
+    if (models->isReady()) {
+        startAsyncOcr(qimg);
+        return;
+    }
+
+    // モデル不足 → DL → ready で非同期 OCR 開始
+#ifdef _WIN32
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+#endif
+
+    QPointer<OverlayWindow> self(this);
+    auto* nReady  = new QMetaObject::Connection;
+    auto* nFailed = new QMetaObject::Connection;
+    *nReady = connect(models, &OcrModelManager::ready, this,
+        [self, qimg, nReady, nFailed]() {
+            QObject::disconnect(*nReady);
+            QObject::disconnect(*nFailed);
+            delete nReady; delete nFailed;
+            if (self) self->startAsyncOcr(qimg);
+        });
+    *nFailed = connect(models, &OcrModelManager::failed, this,
+        [self, nReady, nFailed](const QString& msg) {
+            QObject::disconnect(*nReady);
+            QObject::disconnect(*nFailed);
+            delete nReady; delete nFailed;
+            if (!self) return;
+            QMessageBox::warning(self, "OCR モデル",
+                QString("モデルのダウンロードに失敗しました:\n%1").arg(msg));
+#ifdef _WIN32
+            HWND h = reinterpret_cast<HWND>(self->winId());
+            SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            self->activateWindow(); self->setFocus();
+#endif
+        });
+
+    models->ensureModelsAsync(this);
+}
+
+void OverlayWindow::startAsyncOcr(const QImage& qimg) {
+    // 1) オーバーレイを即閉じて UI ブロック感を解消
+    emit finished();
+    close();
+
+    // 2) 進捗ダイアログ（最初は busy 表示、進捗が来たら確定値に切替）
+    auto* dlg = new QProgressDialog(
+        QStringLiteral("OCR 処理中…"),
+        QString(),
+        0, 0, nullptr);
+    dlg->setWindowTitle(QStringLiteral("OCR"));
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowModality(Qt::NonModal);
+    dlg->setCancelButton(nullptr);
+    dlg->setMinimumDuration(0);
+    dlg->setRange(0, 0);
+    dlg->setWindowFlags(dlg->windowFlags() | Qt::WindowStaysOnTopHint);
+    dlg->show();
+    dlg->raise();
+    QPointer<QProgressDialog> dlgPtr(dlg);
+
+    // 3) Ocr の進捗シグナルをダイアログに反映（別スレッド→UIスレッド自動 queued）
+    auto progConn = QObject::connect(&Ocr::instance(), &Ocr::progress, dlg,
+        [dlgPtr](int current, int total, const QString& stage) {
+            if (!dlgPtr) return;
+            if (total > 0) {
+                if (dlgPtr->maximum() != total) dlgPtr->setRange(0, total);
+                dlgPtr->setValue(current);
+                dlgPtr->setLabelText(QString("%1  %2 / %3")
+                                     .arg(stage).arg(current).arg(total));
+            } else {
+                dlgPtr->setRange(0, 0);  // indeterminate
+                dlgPtr->setLabelText(stage.isEmpty()
+                                     ? QStringLiteral("OCR 処理中…") : stage);
+            }
+        });
+
+    // 4) 別スレッドで recognize 実行
+    using OcrPair = QPair<QString, QString>;  // {text, err}
+    auto future = QtConcurrent::run([qimg]() -> OcrPair {
+        QString err;
+        QString text = Ocr::instance().recognize(qimg, &err);
+        return qMakePair(text, err);
+    });
+
+    // 5) 完了時に UI スレッドで結果反映
+    auto* watcher = new QFutureWatcher<OcrPair>(qApp);
+    QObject::connect(watcher, &QFutureWatcher<OcrPair>::finished, qApp,
+        [watcher, dlgPtr, progConn]() {
+            QObject::disconnect(progConn);
+            const OcrPair r = watcher->result();
+            watcher->deleteLater();
+            if (dlgPtr) dlgPtr->close();
+
+            const QString& text = r.first;
+            const QString& err  = r.second;
+
+            if (!text.isEmpty()) {
+                QGuiApplication::clipboard()->setText(text);
+                const int chars = text.length();
+                const int lines = text.count(QLatin1Char('\n')) + 1;
+                Toast::show(
+                    QStringLiteral("OCR 完了"),
+                    QStringLiteral("%1 文字 / %2 行をクリップボードにコピーしました")
+                        .arg(chars).arg(lines));
+            } else {
+                Toast::show(
+                    QStringLiteral("OCR 失敗"),
+                    err.isEmpty()
+                        ? QStringLiteral("テキストが検出できませんでした")
+                        : err);
+            }
+        });
+    watcher->setFuture(future);
 }

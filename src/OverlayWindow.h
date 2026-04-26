@@ -46,6 +46,8 @@ private:
     bool saveImageToDisk(bool withDialog);
     void copyToClipboard();
     bool copyPathViaCache();
+    void runOcrAndCopy();
+    void startAsyncOcr(const QImage& qimg);
     HandleHit hitTest(const QPoint& p) const;
     void setCursorFor(HandleHit h);
 

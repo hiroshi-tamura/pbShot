@@ -1,5 +1,7 @@
 #include "SettingsDialog.h"
 #include "Settings.h"
+#include "Ocr.h"
+#include "OcrModelManager.h"
 #include <QFormLayout>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -13,6 +15,11 @@
 #include <QFileDialog>
 #include <QLabel>
 #include <QIcon>
+#include <QGroupBox>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QMessageBox>
+#include <QDir>
 
 SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle("pbShot 設定");
@@ -89,6 +96,62 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     root->addLayout(form);
 
+    // OCR モデル
+    auto* ocrGroup = new QGroupBox("OCR モデル", this);
+    auto* ocrLayout = new QVBoxLayout(ocrGroup);
+
+    m_ocrStatus = new QLabel(ocrGroup);
+    m_ocrStatus->setWordWrap(true);
+    ocrLayout->addWidget(m_ocrStatus);
+
+    auto* ocrBtnRow = new QHBoxLayout();
+    m_ocrDownloadBtn = new QPushButton("モデルをダウンロード / 再ダウンロード", ocrGroup);
+    m_ocrRemoveBtn   = new QPushButton("モデルを削除", ocrGroup);
+    m_ocrOpenDirBtn  = new QPushButton("フォルダを開く", ocrGroup);
+    ocrBtnRow->addWidget(m_ocrDownloadBtn);
+    ocrBtnRow->addWidget(m_ocrRemoveBtn);
+    ocrBtnRow->addWidget(m_ocrOpenDirBtn);
+    ocrLayout->addLayout(ocrBtnRow);
+
+    root->addWidget(ocrGroup);
+
+    // 初期ステータス表示
+    updateOcrModelStatus();
+
+    // ダウンロード
+    connect(m_ocrDownloadBtn, &QPushButton::clicked, this, [this]() {
+        auto* mgr = Ocr::instance().models();
+        if (!mgr) return;
+        // 二重接続を避けるため UniqueConnection
+        connect(mgr, &OcrModelManager::ready, this,
+                &SettingsDialog::updateOcrModelStatus, Qt::UniqueConnection);
+        connect(mgr, &OcrModelManager::failed, this, [this](const QString& msg) {
+            QMessageBox::warning(this, "OCR モデル", "ダウンロードに失敗しました:\n" + msg);
+            updateOcrModelStatus();
+        }, Qt::UniqueConnection);
+        mgr->ensureModelsAsync(this);
+    });
+
+    // 削除
+    connect(m_ocrRemoveBtn, &QPushButton::clicked, this, [this]() {
+        if (QMessageBox::question(this, "OCR モデル",
+                "ダウンロード済みの OCR モデルをすべて削除しますか？")
+            != QMessageBox::Yes) {
+            return;
+        }
+        if (auto* mgr = Ocr::instance().models()) {
+            mgr->removeAll();
+        }
+        updateOcrModelStatus();
+    });
+
+    // フォルダを開く
+    connect(m_ocrOpenDirBtn, &QPushButton::clicked, this, [this]() {
+        const QString dir = Settings::modelsDir();
+        QDir().mkpath(dir);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+    });
+
     auto* note = new QLabel(
         "※ ホットキーが他アプリや Windows の機能と衝突している場合は登録に失敗します。\n"
         "※ Print Screen は Win11 の切り取りツールに奪われやすいので、Ctrl+Shift+ 等を推奨。",
@@ -102,6 +165,18 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     root->addWidget(buttons);
+}
+
+void SettingsDialog::updateOcrModelStatus() {
+    if (!m_ocrStatus) return;
+    auto* mgr = Ocr::instance().models();
+    if (mgr && mgr->isReady()) {
+        m_ocrStatus->setText("✓ 使用可能（合計 約 17 MB）");
+        m_ocrStatus->setStyleSheet("color:#2a7a2a;");
+    } else {
+        m_ocrStatus->setText("未ダウンロード");
+        m_ocrStatus->setStyleSheet("color:#a04040;");
+    }
 }
 
 void SettingsDialog::browseSaveDir() {

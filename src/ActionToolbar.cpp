@@ -25,6 +25,11 @@ ActionToolbar::ActionToolbar(QWidget* parent) : QFrame(parent) {
     lay->addWidget(m_sizeLabel);
     lay->addSpacing(6);
 
+    auto* ocrBtn = makeBtn(":/icons/act_ocr.svg",
+                            "選択範囲の文字を抽出してクリップボードにコピー (OCR)");
+    connect(ocrBtn, &QToolButton::clicked, this, &ActionToolbar::ocrRequested);
+    lay->addWidget(ocrBtn);
+
     auto* pathBtn = makeBtn(":/icons/act_pathcopy.svg",
                              "画像をキャッシュに保存してパスをクリップボードにコピー");
     connect(pathBtn, &QToolButton::clicked, this, &ActionToolbar::copyPathRequested);

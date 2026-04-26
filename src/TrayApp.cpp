@@ -4,6 +4,7 @@
 #include "OverlayWindow.h"
 #include "Settings.h"
 #include "SettingsDialog.h"
+#include "Toast.h"
 #include <QSystemTrayIcon>
 #include <QMenu>
 #include <QAction>
@@ -60,6 +61,8 @@ bool TrayApp::start() {
     m_tray->showMessage("pbShot",
         QString("起動しました。%1 で範囲選択、%2 で全画面保存。").arg(hkR, hkF),
         QSystemTrayIcon::Information, 3500);
+
+    Toast::setTrayIcon(m_tray);
     return true;
 }
 

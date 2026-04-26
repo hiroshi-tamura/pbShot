@@ -45,3 +45,11 @@ cmake --build build -j4
 - `Ctrl+C` : クリップボードコピー
 - `ESC` : キャンセル
 - テキストツール中: `Enter` 改行 / `Ctrl+Enter` 確定 / `ESC` キャンセル
+
+## サードパーティライセンス
+
+OCR 機能のために以下のサードパーティ成果物を同梱しています。各ライセンス全文は `LICENSES/` フォルダに収録。
+
+- **PaddleOCR PP-OCRv4 モデル**（Baidu 著作） — Apache License 2.0
+- **RapidOCR**（RapidAI） — Apache License 2.0
+- **ONNX Runtime**（Microsoft） — MIT License

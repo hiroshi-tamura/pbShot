@@ -14,5 +14,6 @@
     <file>icons/act_pathcopy.svg</file>
     <file>icons/act_save.svg</file>
     <file>icons/act_close.svg</file>
+    <file>icons/act_ocr.svg</file>
 </qresource>
 </RCC>

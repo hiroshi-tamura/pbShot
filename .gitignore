@@ -2,6 +2,16 @@
 build/
 release/
 Cache/
+third_party/
+models/
+
+# transient runtime / hand-off
+/Log
+HANDOFF.txt
+HANDOVER.txt
+HANDOVER.md
+HANDOVER.md.bak
+hf-tree.json
 
 # IDE / editor
 .vscode/

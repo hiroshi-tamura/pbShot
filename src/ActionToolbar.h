@@ -13,6 +13,7 @@ public:
 signals:
     void copyRequested();
     void copyPathRequested();
+    void ocrRequested();
     void saveRequested();
     void closeRequested();
 

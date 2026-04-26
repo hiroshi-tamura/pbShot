@@ -45,6 +45,12 @@ QString Settings::cacheDir() {
     return d;
 }
 
+QString Settings::modelsDir() {
+    QString d = QCoreApplication::applicationDirPath() + "/models";
+    QDir().mkpath(d);
+    return d;
+}
+
 // 自動起動キーだけは Windows 仕様上 HKCU\...\Run に書く必要があるため例外。
 // それ以外の設定は exe 隣の pbShot.ini に集約している。
 
