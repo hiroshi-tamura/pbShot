@@ -4,6 +4,7 @@
 #include "Settings.h"
 #include "Ocr.h"
 #include "OcrModelManager.h"
+#include "TesseractOcr.h"
 #include "Toast.h"
 #include <QPainter>
 #include <QMouseEvent>
@@ -724,6 +725,22 @@ void OverlayWindow::runOcrAndCopy() {
     if (img.isNull()) return;
     QImage qimg = img.toImage();
 
+    const QString engine = Settings::ocrEngine();
+
+    // Tesseract 経路: モデル DL 不要、tesseract.exe があれば即実行。
+    if (engine == "tesseract") {
+        if (!TesseractOcr::instance().isReady()) {
+            QMessageBox::warning(this, "OCR",
+                "Tesseract が見つかりません。\n"
+                "exe と同じフォルダに tesseract/ サブフォルダを配置するか、"
+                "PATH 上に tesseract.exe を置いてください。");
+            return;
+        }
+        startAsyncOcr(qimg);
+        return;
+    }
+
+    // PP-OCR 経路: モデルが揃っていれば直行、無ければ DL してから推論。
     auto* models = Ocr::instance().models();
     if (models->isReady()) {
         startAsyncOcr(qimg);
@@ -765,6 +782,9 @@ void OverlayWindow::runOcrAndCopy() {
 }
 
 void OverlayWindow::startAsyncOcr(const QImage& qimg) {
+    const QString engine = Settings::ocrEngine();
+    const bool useTesseract = (engine == "tesseract");
+
     // 1) オーバーレイを即閉じて UI ブロック感を解消
     emit finished();
     close();
@@ -774,7 +794,8 @@ void OverlayWindow::startAsyncOcr(const QImage& qimg) {
         QStringLiteral("OCR 処理中…"),
         QString(),
         0, 0, nullptr);
-    dlg->setWindowTitle(QStringLiteral("OCR"));
+    dlg->setWindowTitle(useTesseract ? QStringLiteral("OCR (Tesseract)")
+                                     : QStringLiteral("OCR (PP-OCR)"));
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowModality(Qt::NonModal);
     dlg->setCancelButton(nullptr);
@@ -785,34 +806,47 @@ void OverlayWindow::startAsyncOcr(const QImage& qimg) {
     dlg->raise();
     QPointer<QProgressDialog> dlgPtr(dlg);
 
-    // 3) Ocr の進捗シグナルをダイアログに反映（別スレッド→UIスレッド自動 queued）
-    auto progConn = QObject::connect(&Ocr::instance(), &Ocr::progress, dlg,
-        [dlgPtr](int current, int total, const QString& stage) {
-            if (!dlgPtr) return;
-            if (total > 0) {
-                if (dlgPtr->maximum() != total) dlgPtr->setRange(0, total);
-                dlgPtr->setValue(current);
-                dlgPtr->setLabelText(QString("%1  %2 / %3")
-                                     .arg(stage).arg(current).arg(total));
-            } else {
-                dlgPtr->setRange(0, 0);  // indeterminate
-                dlgPtr->setLabelText(stage.isEmpty()
-                                     ? QStringLiteral("OCR 処理中…") : stage);
-            }
-        });
+    // 3) 進捗シグナルをダイアログに反映（別スレッド→UIスレッド自動 queued）
+    auto applyProgress = [dlgPtr](int current, int total, const QString& stage) {
+        if (!dlgPtr) return;
+        if (total > 0) {
+            if (dlgPtr->maximum() != total) dlgPtr->setRange(0, total);
+            dlgPtr->setValue(current);
+            dlgPtr->setLabelText(QString("%1  %2 / %3")
+                                 .arg(stage).arg(current).arg(total));
+        } else {
+            dlgPtr->setRange(0, 0);
+            dlgPtr->setLabelText(stage.isEmpty()
+                                 ? QStringLiteral("OCR 処理中…") : stage);
+        }
+    };
+
+    QMetaObject::Connection progConn;
+    if (useTesseract) {
+        progConn = QObject::connect(&TesseractOcr::instance(),
+                                    &TesseractOcr::progress, dlg, applyProgress);
+    } else {
+        progConn = QObject::connect(&Ocr::instance(),
+                                    &Ocr::progress, dlg, applyProgress);
+    }
 
     // 4) 別スレッドで recognize 実行
     using OcrPair = QPair<QString, QString>;  // {text, err}
-    auto future = QtConcurrent::run([qimg]() -> OcrPair {
+    auto future = QtConcurrent::run([qimg, useTesseract]() -> OcrPair {
         QString err;
-        QString text = Ocr::instance().recognize(qimg, &err);
+        QString text;
+        if (useTesseract) {
+            text = TesseractOcr::instance().recognize(qimg, "jpn+eng", &err);
+        } else {
+            text = Ocr::instance().recognize(qimg, &err);
+        }
         return qMakePair(text, err);
     });
 
     // 5) 完了時に UI スレッドで結果反映
     auto* watcher = new QFutureWatcher<OcrPair>(qApp);
     QObject::connect(watcher, &QFutureWatcher<OcrPair>::finished, qApp,
-        [watcher, dlgPtr, progConn]() {
+        [watcher, dlgPtr, progConn, useTesseract]() {
             QObject::disconnect(progConn);
             const OcrPair r = watcher->result();
             watcher->deleteLater();
@@ -821,17 +855,24 @@ void OverlayWindow::startAsyncOcr(const QImage& qimg) {
             const QString& text = r.first;
             const QString& err  = r.second;
 
+            const QString title = useTesseract
+                ? QStringLiteral("OCR 完了 (Tesseract)")
+                : QStringLiteral("OCR 完了 (PP-OCR)");
+            const QString failTitle = useTesseract
+                ? QStringLiteral("OCR 失敗 (Tesseract)")
+                : QStringLiteral("OCR 失敗 (PP-OCR)");
+
             if (!text.isEmpty()) {
                 QGuiApplication::clipboard()->setText(text);
                 const int chars = text.length();
                 const int lines = text.count(QLatin1Char('\n')) + 1;
                 Toast::show(
-                    QStringLiteral("OCR 完了"),
+                    title,
                     QStringLiteral("%1 文字 / %2 行をクリップボードにコピーしました")
                         .arg(chars).arg(lines));
             } else {
                 Toast::show(
-                    QStringLiteral("OCR 失敗"),
+                    failTitle,
                     err.isEmpty()
                         ? QStringLiteral("テキストが検出できませんでした")
                         : err);

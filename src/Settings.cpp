@@ -51,8 +51,22 @@ QString Settings::modelsDir() {
     return d;
 }
 
-// 自動起動キーだけは Windows 仕様上 HKCU\...\Run に書く必要があるため例外。
-// それ以外の設定は exe 隣の pbShot.ini に集約している。
+QString Settings::ocrEngine() {
+    return s().value("ocrEngine", "tesseract").toString();
+}
+void Settings::setOcrEngine(const QString& e) {
+    s().setValue("ocrEngine", e);
+}
+
+QString Settings::tesseractDir() {
+    return QCoreApplication::applicationDirPath() + "/tesseract";
+}
+QString Settings::tessdataDir() {
+    return QCoreApplication::applicationDirPath() + "/tessdata";
+}
+
+// 自動起動キーだけは Windows 仕様上 HKCU\...\Run、macOS では LaunchAgent plist
+// に書く必要があるため例外。それ以外の設定は exe 隣の pbShot.ini に集約している。
 
 void Settings::ensureInitialized() {
     saveDir();   // mkpath
@@ -62,6 +76,12 @@ void Settings::ensureInitialized() {
         s().sync();
     }
 }
+
+#ifdef Q_OS_MACOS
+static QString macLaunchAgentPath() {
+    return QDir::homePath() + "/Library/LaunchAgents/com.hiroshitamura.pbShot.plist";
+}
+#endif
 void Settings::setCacheDir(const QString& dir) { s().setValue("cacheDir", dir); }
 QString Settings::nextCacheFilename() {
     QString ts = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
@@ -93,14 +113,23 @@ void Settings::pruneCache() {
 int Settings::imageQuality() { return s().value("imageQuality", 90).toInt(); }
 void Settings::setImageQuality(int q) { s().setValue("imageQuality", q); }
 
+#ifdef Q_OS_WIN
 static const char* kAutostartKey =
     "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+#endif
 
 bool Settings::autostart() {
+#ifdef Q_OS_WIN
     QSettings reg(kAutostartKey, QSettings::NativeFormat);
     return reg.contains("pbShot");
+#elif defined(Q_OS_MACOS)
+    return QFile::exists(macLaunchAgentPath());
+#else
+    return false;
+#endif
 }
 void Settings::setAutostart(bool enable) {
+#ifdef Q_OS_WIN
     QSettings reg(kAutostartKey, QSettings::NativeFormat);
     if (enable) {
         QString path = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
@@ -109,6 +138,36 @@ void Settings::setAutostart(bool enable) {
         reg.remove("pbShot");
     }
     reg.sync();
+#elif defined(Q_OS_MACOS)
+    const QString plist = macLaunchAgentPath();
+    QDir().mkpath(QFileInfo(plist).absolutePath());
+    if (enable) {
+        // .app バンドル内 MacOS/pbShot を直接起動する
+        QString exe = QCoreApplication::applicationFilePath();
+        QString contents = QStringLiteral(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\">\n"
+            "<dict>\n"
+            "  <key>Label</key><string>com.hiroshitamura.pbShot</string>\n"
+            "  <key>ProgramArguments</key>\n"
+            "  <array><string>%1</string></array>\n"
+            "  <key>RunAtLoad</key><true/>\n"
+            "  <key>KeepAlive</key><false/>\n"
+            "</dict>\n"
+            "</plist>\n").arg(exe);
+        QFile f(plist);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            f.write(contents.toUtf8());
+            f.close();
+        }
+    } else {
+        QFile::remove(plist);
+    }
+#else
+    Q_UNUSED(enable);
+#endif
 }
 
 QKeySequence Settings::hotkeyRegion() {

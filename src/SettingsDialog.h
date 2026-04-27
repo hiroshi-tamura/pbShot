@@ -32,7 +32,11 @@ private:
     QSpinBox*          m_quality = nullptr;
     QSpinBox*          m_cacheMaxMB = nullptr;
 
-    // OCR モデル
+    // OCR エンジン
+    QComboBox*         m_ocrEngine = nullptr;
+    QLabel*            m_tessStatus = nullptr;
+
+    // OCR モデル (PP-OCR)
     QLabel*            m_ocrStatus = nullptr;
     QPushButton*       m_ocrDownloadBtn = nullptr;
     QPushButton*       m_ocrRemoveBtn = nullptr;

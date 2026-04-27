@@ -2,6 +2,7 @@
 #include "Settings.h"
 #include "Ocr.h"
 #include "OcrModelManager.h"
+#include "TesseractOcr.h"
 #include <QFormLayout>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -96,8 +97,42 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     root->addLayout(form);
 
-    // OCR モデル
-    auto* ocrGroup = new QGroupBox("OCR モデル", this);
+    // OCR エンジン
+    auto* engGroup = new QGroupBox("OCR エンジン", this);
+    auto* engLayout = new QVBoxLayout(engGroup);
+
+    auto* engRow = new QHBoxLayout();
+    auto* engLabel = new QLabel("使用エンジン:", engGroup);
+    m_ocrEngine = new QComboBox(engGroup);
+    m_ocrEngine->addItem("Tesseract OCR (推奨)", "tesseract");
+    m_ocrEngine->addItem("PP-OCRv5 (ONNX Runtime)", "ppocr");
+    {
+        int idx = m_ocrEngine->findData(Settings::ocrEngine());
+        if (idx < 0) idx = 0;
+        m_ocrEngine->setCurrentIndex(idx);
+    }
+    engRow->addWidget(engLabel);
+    engRow->addWidget(m_ocrEngine, 1);
+    engLayout->addLayout(engRow);
+
+    m_tessStatus = new QLabel(engGroup);
+    m_tessStatus->setWordWrap(true);
+    engLayout->addWidget(m_tessStatus);
+
+    {
+        const auto& tess = TesseractOcr::instance();
+        if (tess.isReady()) {
+            m_tessStatus->setText(QString("✓ Tesseract 同梱済み: %1").arg(tess.tesseractExePath()));
+            m_tessStatus->setStyleSheet("color:#2a7a2a;");
+        } else {
+            m_tessStatus->setText("⚠ Tesseract が見つかりません（exe 隣の tesseract/ または PATH に配置してください）");
+            m_tessStatus->setStyleSheet("color:#a04040;");
+        }
+    }
+    root->addWidget(engGroup);
+
+    // OCR モデル (PP-OCR)
+    auto* ocrGroup = new QGroupBox("PP-OCR モデル", this);
     auto* ocrLayout = new QVBoxLayout(ocrGroup);
 
     m_ocrStatus = new QLabel(ocrGroup);
@@ -199,6 +234,7 @@ void SettingsDialog::accept() {
     Settings::setHotkeyFullscreen(m_hkFull->keySequence());
     Settings::setCopyToClipboardOnSave(m_clipboardOnSave->isChecked());
     Settings::setAutostart(m_autostart->isChecked());
+    Settings::setOcrEngine(m_ocrEngine->currentData().toString());
     // フォルダが無ければ作成
     QDir().mkpath(m_saveDir->text());
     QDir().mkpath(m_cacheDir->text());

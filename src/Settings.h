@@ -27,6 +27,14 @@ public:
     // OCR モデル: exe 隣の models/ フォルダ（ポータブル）
     static QString modelsDir();
 
+    // OCR エンジン選択。"tesseract" (既定) または "ppocr"
+    static QString ocrEngine();
+    static void    setOcrEngine(const QString& engine);
+
+    // Tesseract 用ポータブルディレクトリ（exe 隣）
+    static QString tesseractDir();
+    static QString tessdataDir();
+
     static int  imageQuality();
     static void setImageQuality(int q);
 
