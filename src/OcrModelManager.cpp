@@ -8,7 +8,6 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QProgressDialog>
-#include <QApplication>
 #include <QThread>
 
 namespace {
@@ -22,6 +21,11 @@ constexpr const char* kHF_PPv1 =
     "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv1/";
 constexpr const char* kGH_PDLOCR_MAIN =
     "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/";
+
+// rename 直後のメタデータ反映を待つポーリング設定。
+// 80MB 級のファイルでは Windows のキャッシュ反映に最大数秒かかる。
+constexpr int kReadyPollIntervalMs = 100;
+constexpr int kReadyPollTimeoutMs  = 5000;
 }
 
 OcrModelManager::OcrModelManager(QObject* parent) : QObject(parent) {
@@ -49,7 +53,7 @@ OcrModelManager::OcrModelManager(QObject* parent) : QObject(parent) {
 
 OcrModelManager::~OcrModelManager() {
     if (m_reply) { m_reply->abort(); m_reply->deleteLater(); }
-    if (m_currentFile) { m_currentFile->close(); delete m_currentFile; }
+    // m_currentFile は unique_ptr が close + delete を自動実行する
 }
 
 QString OcrModelManager::fullPath(const ModelFile& m) const {
@@ -111,11 +115,11 @@ void OcrModelManager::startNext() {
         if (m_index >= m_files.size()) {
             if (m_dlg) { m_dlg->close(); m_dlg->deleteLater(); m_dlg = nullptr; }
             // 大きなファイルの rename 直後は QFileInfo のサイズが
-            // 0 を返すことがあるので、最大 5 秒間ポーリングしてから判定する。
+            // 0 を返すことがあるので、最大 kReadyPollTimeoutMs ポーリングする。
             int waited = 0;
-            while (!isReady() && waited < 5000) {
-                QThread::msleep(100);
-                waited += 100;
+            while (!isReady() && waited < kReadyPollTimeoutMs) {
+                QThread::msleep(kReadyPollIntervalMs);
+                waited += kReadyPollIntervalMs;
             }
             if (isReady()) emit ready();
             else {
@@ -157,8 +161,8 @@ void OcrModelManager::startUrl() {
     }
 
     QString outPath = fullPath(m) + ".part";
-    if (m_currentFile) { m_currentFile->close(); delete m_currentFile; }
-    m_currentFile = new QFile(outPath);
+    m_currentFile.reset();  // 既存があれば close + delete
+    m_currentFile = std::make_unique<QFile>(outPath);
     if (!m_currentFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         cancelAll(QString("ファイルを開けません: %1").arg(outPath));
         return;
@@ -183,7 +187,8 @@ void OcrModelManager::onProgress(qint64 received, qint64 total) {
     if (!m_dlg) return;
     int pct = (total > 0) ? int((received * 100) / total) : 0;
     m_dlg->setValue(pct);
-    QApplication::processEvents();
+    // QApplication::processEvents() は再入の温床。downloadProgress は元から
+    // メインループで配送されるので、明示的にイベントを回す必要は無い。
 }
 
 void OcrModelManager::onFinished() {
@@ -192,11 +197,13 @@ void OcrModelManager::onFinished() {
     int httpStatus = m_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     QByteArray remaining = m_reply->readAll();
     if (m_currentFile && !remaining.isEmpty()) m_currentFile->write(remaining);
-    if (m_currentFile) { m_currentFile->flush(); m_currentFile->close(); }
-
-    QString partPath = m_currentFile ? m_currentFile->fileName() : QString();
-    delete m_currentFile;
-    m_currentFile = nullptr;
+    QString partPath;
+    if (m_currentFile) {
+        m_currentFile->flush();
+        m_currentFile->close();
+        partPath = m_currentFile->fileName();
+    }
+    m_currentFile.reset();
 
     QNetworkReply* r = m_reply;
     m_reply = nullptr;
@@ -255,8 +262,7 @@ void OcrModelManager::cancelAll(const QString& msg) {
     if (m_currentFile) {
         m_currentFile->close();
         QFile::remove(m_currentFile->fileName());
-        delete m_currentFile;
-        m_currentFile = nullptr;
+        m_currentFile.reset();
     }
     if (m_dlg) {
         m_dlg->close();

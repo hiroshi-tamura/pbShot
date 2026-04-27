@@ -3,6 +3,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <memory>
 
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -58,11 +59,11 @@ private:
     bool fileLooksValid(const ModelFile& m) const;
 
     QVector<ModelFile> m_files;
-    QNetworkAccessManager* m_nam = nullptr;
-    QNetworkReply* m_reply = nullptr;
-    QFile* m_currentFile = nullptr;
+    QNetworkAccessManager* m_nam = nullptr;     // QObject 親 = this、Qt が回収
+    QNetworkReply* m_reply = nullptr;           // deleteLater で個別管理
+    std::unique_ptr<QFile> m_currentFile;       // .part への書き込み用
     int m_index = -1;
     int m_urlIndex = 0;
 
-    class QProgressDialog* m_dlg = nullptr;
+    class QProgressDialog* m_dlg = nullptr;     // parent ウィジェットが所有
 };

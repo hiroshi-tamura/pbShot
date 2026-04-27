@@ -1,5 +1,6 @@
 #include "TesseractOcr.h"
 #include "Settings.h"
+#include "Logger.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -9,18 +10,10 @@
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QDateTime>
-#include <QStringConverter>
-#include <QTextStream>
 
 namespace {
-void tessLog(const QString& msg) {
-    QFile f(QCoreApplication::applicationDirPath() + "/pbShot_ocr.log");
-    if (f.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream ts(&f);
-        ts.setEncoding(QStringConverter::Utf8);
-        ts << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")
-           << "  [tess] " << msg << "\n";
-    }
+inline void tessLog(const QString& msg) {
+    Logger::log(QStringLiteral("ocr"), QStringLiteral("[tess] ") + msg);
 }
 } // namespace
 

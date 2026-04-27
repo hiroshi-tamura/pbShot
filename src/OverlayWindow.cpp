@@ -5,7 +5,9 @@
 #include "Ocr.h"
 #include "OcrModelManager.h"
 #include "TesseractOcr.h"
+#include "IOcrEngine.h"
 #include "Toast.h"
+#include "Logger.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -85,16 +87,21 @@ private:
 };
 } // namespace
 
-static void pbLog(const QString& s) {
-    QFile f(QDir::tempPath() + "/pbShot.log");
-    if (f.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream ts(&f);
-        ts << QDateTime::currentDateTime().toString("hh:mm:ss.zzz ") << s << "\n";
-    }
+static inline void pbLog(const QString& s) {
+    Logger::log(QStringLiteral("overlay"), s);
 }
 
-static const int kHandleSize = 8;
-static const int kHandleHit = 10;
+// ---- レイアウト定数 ----------------------------------------------------------
+static constexpr int kHandleSize = 8;        // 角・辺ハンドル描画サイズ
+static constexpr int kHandleHit  = 10;       // ハンドルの当たり判定半径（未使用予備）
+static constexpr int kHandleCornerHit = 12;  // 角ハンドルの当たり半径
+static constexpr int kHandleEdgeHit   = 10;  // 辺ハンドルの当たり半径
+static constexpr int kFrameBand       = 6;   // 枠線移動ハンドルの帯幅
+static constexpr int kToolbarMargin   = 4;   // ツールバーと選択枠の間隔
+static constexpr int kToolbarGap      = 6;   // 選択枠とツールバーの基本オフセット
+static constexpr int kSelectionMinPx  = 3;   // 選択矩形として認識する最小辺
+// 全体共通の post-key-up 待機 (ホットキー再登録までのディレイ)。
+static constexpr int kHotkeyRearmDelayMs = 200;
 
 OverlayWindow::OverlayWindow(const QPixmap& shot, const QRect& virtualRectLogical, qreal maxDpr)
     : QWidget(nullptr),
@@ -392,9 +399,9 @@ void OverlayWindow::paintEvent(QPaintEvent*) {
 OverlayWindow::HandleHit OverlayWindow::hitTest(const QPoint& p) const {
     if (m_selection.isNull()) return HandleHit::None;
     QRect sel = m_selection.normalized();
-    const int corner = 12;   // 角ハンドルの当たり半径
-    const int edgeH  = 10;   // 中央辺ハンドルの当たり半径
-    const int band   = 6;    // 枠線の帯
+    const int corner = kHandleCornerHit;
+    const int edgeH  = kHandleEdgeHit;
+    const int band   = kFrameBand;
 
     auto nearPt = [&](int x, int y, int r) {
         return QRect(x - r, y - r, r * 2, r * 2).contains(p);
@@ -548,7 +555,8 @@ void OverlayWindow::mouseReleaseEvent(QMouseEvent* e) {
     if (m_stage == Stage::Selecting && m_dragging) {
         m_dragging = false;
         m_selection = QRect(m_dragStart, e->pos()).normalized().intersected(rect());
-        if (m_selection.width() < 3 || m_selection.height() < 3) {
+        if (m_selection.width() < kSelectionMinPx ||
+            m_selection.height() < kSelectionMinPx) {
             // 点クリック扱い: 何もしない
             m_selection = QRect();
             update();
@@ -616,22 +624,22 @@ void OverlayWindow::updateToolbarPositions() {
     m_actionBar->adjustSize();
 
     // 縦ツールバー: 右、垂直中央寄せ
-    int ebX = sel.right() + 6;
-    if (ebX + m_editBar->width() > width() - 4)
-        ebX = sel.left() - 6 - m_editBar->width();
+    int ebX = sel.right() + kToolbarGap;
+    if (ebX + m_editBar->width() > width() - kToolbarMargin)
+        ebX = sel.left() - kToolbarGap - m_editBar->width();
     int ebY = sel.top();
-    if (ebY + m_editBar->height() > height() - 4)
-        ebY = height() - 4 - m_editBar->height();
-    if (ebY < 4) ebY = 4;
+    if (ebY + m_editBar->height() > height() - kToolbarMargin)
+        ebY = height() - kToolbarMargin - m_editBar->height();
+    if (ebY < kToolbarMargin) ebY = kToolbarMargin;
     m_editBar->move(ebX, ebY);
 
     // 横ツールバー: 下、右寄せ
-    int abY = sel.bottom() + 6;
-    if (abY + m_actionBar->height() > height() - 4)
-        abY = sel.top() - 6 - m_actionBar->height();
+    int abY = sel.bottom() + kToolbarGap;
+    if (abY + m_actionBar->height() > height() - kToolbarMargin)
+        abY = sel.top() - kToolbarGap - m_actionBar->height();
     int abX = sel.right() - m_actionBar->width();
-    if (abX < 4) abX = 4;
-    if (abY < 4) abY = 4;
+    if (abX < kToolbarMargin) abX = kToolbarMargin;
+    if (abY < kToolbarMargin) abY = kToolbarMargin;
     m_actionBar->move(abX, abY);
 
     m_editBar->raise();
@@ -754,20 +762,20 @@ void OverlayWindow::runOcrAndCopy() {
 #endif
 
     QPointer<OverlayWindow> self(this);
-    auto* nReady  = new QMetaObject::Connection;
-    auto* nFailed = new QMetaObject::Connection;
-    *nReady = connect(models, &OcrModelManager::ready, this,
-        [self, qimg, nReady, nFailed]() {
-            QObject::disconnect(*nReady);
-            QObject::disconnect(*nFailed);
-            delete nReady; delete nFailed;
+    // 2 本の接続を相互に解除し、必ず両方が一度だけ走るようにする。
+    // shared_ptr で寿命を束ねれば、生 new/delete もダングリングも生じない。
+    auto conns = std::make_shared<std::pair<QMetaObject::Connection,
+                                            QMetaObject::Connection>>();
+    conns->first = connect(models, &OcrModelManager::ready, this,
+        [self, qimg, conns]() {
+            QObject::disconnect(conns->first);
+            QObject::disconnect(conns->second);
             if (self) self->startAsyncOcr(qimg);
         });
-    *nFailed = connect(models, &OcrModelManager::failed, this,
-        [self, nReady, nFailed](const QString& msg) {
-            QObject::disconnect(*nReady);
-            QObject::disconnect(*nFailed);
-            delete nReady; delete nFailed;
+    conns->second = connect(models, &OcrModelManager::failed, this,
+        [self, conns](const QString& msg) {
+            QObject::disconnect(conns->first);
+            QObject::disconnect(conns->second);
             if (!self) return;
             QMessageBox::warning(self, "OCR モデル",
                 QString("モデルのダウンロードに失敗しました:\n%1").arg(msg));
@@ -782,8 +790,8 @@ void OverlayWindow::runOcrAndCopy() {
 }
 
 void OverlayWindow::startAsyncOcr(const QImage& qimg) {
-    const QString engine = Settings::ocrEngine();
-    const bool useTesseract = (engine == "tesseract");
+    IOcrEngine* engine = currentOcrEngine();
+    const QString engineName = engine->displayName();
 
     // 1) オーバーレイを即閉じて UI ブロック感を解消
     emit finished();
@@ -794,8 +802,7 @@ void OverlayWindow::startAsyncOcr(const QImage& qimg) {
         QStringLiteral("OCR 処理中…"),
         QString(),
         0, 0, nullptr);
-    dlg->setWindowTitle(useTesseract ? QStringLiteral("OCR (Tesseract)")
-                                     : QStringLiteral("OCR (PP-OCR)"));
+    dlg->setWindowTitle(QStringLiteral("OCR (") + engineName + QLatin1Char(')'));
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowModality(Qt::NonModal);
     dlg->setCancelButton(nullptr);
@@ -821,32 +828,21 @@ void OverlayWindow::startAsyncOcr(const QImage& qimg) {
         }
     };
 
-    QMetaObject::Connection progConn;
-    if (useTesseract) {
-        progConn = QObject::connect(&TesseractOcr::instance(),
-                                    &TesseractOcr::progress, dlg, applyProgress);
-    } else {
-        progConn = QObject::connect(&Ocr::instance(),
-                                    &Ocr::progress, dlg, applyProgress);
-    }
+    QMetaObject::Connection progConn =
+        QObject::connect(engine, &IOcrEngine::progress, dlg, applyProgress);
 
     // 4) 別スレッドで recognize 実行
     using OcrPair = QPair<QString, QString>;  // {text, err}
-    auto future = QtConcurrent::run([qimg, useTesseract]() -> OcrPair {
+    auto future = QtConcurrent::run([qimg, engine]() -> OcrPair {
         QString err;
-        QString text;
-        if (useTesseract) {
-            text = TesseractOcr::instance().recognize(qimg, "jpn+eng", &err);
-        } else {
-            text = Ocr::instance().recognize(qimg, &err);
-        }
+        QString text = engine->recognize(qimg, &err);
         return qMakePair(text, err);
     });
 
     // 5) 完了時に UI スレッドで結果反映
     auto* watcher = new QFutureWatcher<OcrPair>(qApp);
     QObject::connect(watcher, &QFutureWatcher<OcrPair>::finished, qApp,
-        [watcher, dlgPtr, progConn, useTesseract]() {
+        [watcher, dlgPtr, progConn, engineName]() {
             QObject::disconnect(progConn);
             const OcrPair r = watcher->result();
             watcher->deleteLater();
@@ -855,24 +851,17 @@ void OverlayWindow::startAsyncOcr(const QImage& qimg) {
             const QString& text = r.first;
             const QString& err  = r.second;
 
-            const QString title = useTesseract
-                ? QStringLiteral("OCR 完了 (Tesseract)")
-                : QStringLiteral("OCR 完了 (PP-OCR)");
-            const QString failTitle = useTesseract
-                ? QStringLiteral("OCR 失敗 (Tesseract)")
-                : QStringLiteral("OCR 失敗 (PP-OCR)");
-
             if (!text.isEmpty()) {
                 QGuiApplication::clipboard()->setText(text);
                 const int chars = text.length();
                 const int lines = text.count(QLatin1Char('\n')) + 1;
                 Toast::show(
-                    title,
+                    QStringLiteral("OCR 完了 (") + engineName + QLatin1Char(')'),
                     QStringLiteral("%1 文字 / %2 行をクリップボードにコピーしました")
                         .arg(chars).arg(lines));
             } else {
                 Toast::show(
-                    failTitle,
+                    QStringLiteral("OCR 失敗 (") + engineName + QLatin1Char(')'),
                     err.isEmpty()
                         ? QStringLiteral("テキストが検出できませんでした")
                         : err);

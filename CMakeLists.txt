@@ -43,6 +43,8 @@ set(SOURCES
     src/OcrModelManager.cpp
     src/TesseractOcr.cpp
     src/Toast.cpp
+    src/Logger.cpp
+    src/IOcrEngine.cpp
 )
 
 set(HEADERS
@@ -59,6 +61,8 @@ set(HEADERS
     src/OcrModelManager.h
     src/TesseractOcr.h
     src/Toast.h
+    src/Logger.h
+    src/IOcrEngine.h
 )
 
 qt_add_executable(pbShot WIN32 MACOSX_BUNDLE

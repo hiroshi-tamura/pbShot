@@ -1,6 +1,7 @@
 #include "Ocr.h"
 #include "OcrModelManager.h"
 #include "Settings.h"
+#include "Logger.h"
 
 #include <QFile>
 #include <QTextStream>
@@ -10,18 +11,9 @@
 #include <QDebug>
 #include <QStringConverter>
 #include <QCoreApplication>
-#include <QDateTime>
 
 namespace {
-void ocrLog(const QString& msg) {
-    QFile f(QCoreApplication::applicationDirPath() + "/pbShot_ocr.log");
-    if (f.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream ts(&f);
-        ts.setEncoding(QStringConverter::Utf8);
-        ts << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")
-           << "  " << msg << "\n";
-    }
-}
+inline void ocrLog(const QString& msg) { Logger::log(QStringLiteral("ocr"), msg); }
 }
 
 #include <vector>
@@ -83,11 +75,34 @@ void ocrLog(const QString& msg) {
 
 namespace {
 
+// ---- パイプライン定数（マジックナンバー集約） -------------------------------
+// det 入力サイズ: 短辺をこの値にスケール。32 の倍数にラウンドし、上限でクリップ。
+constexpr int kDetShortSide   = 736;
+constexpr int kDetSizeStep    = 32;
+constexpr int kDetSizeMax     = 1280;
+// det 出力 (確率マップ) の二値化しきい値。下げるほど検出感度が上がる。
+constexpr float kDetBinThresh = 0.3f;
+// det で検出した矩形を rec に渡す前の unclip 近似拡張率（横/縦）。
+constexpr float kUnclipRatioX = 0.10f;
+constexpr float kUnclipRatioY = 0.30f;
+constexpr int   kUnclipPadMin = 2;
+// rec 入力幅の上下限 (高さは recInputH をモデルから動的取得)。
+constexpr int kRecMinWidth    = 16;
+constexpr int kRecMaxWidth    = 800;
+constexpr int kRecWidthStep   = 8;
+// rec 入力高さの既定値 (動的取得失敗時)。
+constexpr int kRecDefaultH    = 32;
+// 連結成分の最小辺サイズ (ノイズ抑制)。
+constexpr int kMinComponentSide = 4;
+// 行グルーピングの y 許容幅（最小行高の半分）。
+constexpr int kRowYToleranceMin = 8;
+
+
 #ifdef ORT_AVAILABLE
 
 // シンプルな 4 近傍連結成分 → axis-aligned bbox。
 // in は Format_Grayscale8 (0/255 の 2 値画像) を期待。
-std::vector<QRect> findRects(const QImage& bin, int minSide = 4) {
+std::vector<QRect> findRects(const QImage& bin, int minSide = kMinComponentSide) {
     const int W = bin.width();
     const int H = bin.height();
     std::vector<uint8_t> visited(size_t(W) * size_t(H), 0);
@@ -183,7 +198,7 @@ struct Ocr::Impl {
     bool initialized = false;
     QString lastError;
     // rec モデルの入力高さ。PP-OCRv1=32, PP-OCRv3/v4=48。モデルから動的取得。
-    int recInputH = 32;
+    int recInputH = kRecDefaultH;
 
     Impl() {
         opts.SetIntraOpNumThreads(2);
@@ -349,16 +364,29 @@ std::vector<QRect> Ocr::Impl::runDet(const QImage& detInput) {
     static const float kStd [3] = {0.229f, 0.224f, 0.225f};
 
     // PP-OCR は cv2.imread (BGR) で訓練。QImage RGB888 を BGR に並べ替える。
-    std::vector<float> data(size_t(3) * size_t(H) * size_t(W));
+    // チャネル分離 (CHW) レイアウトを直接書き出すことで、内側ループの
+    // インデックス計算を省略しキャッシュ局所性を改善。
+    const size_t planeSize = size_t(H) * size_t(W);
+    std::vector<float> data(3 * planeSize);
+    float* const planeB = data.data();
+    float* const planeG = data.data() + planeSize;
+    float* const planeR = data.data() + 2 * planeSize;
+    // 事前に正規化定数を逆数に展開（1/std）。
+    const float invStdR = 1.0f / (kStd[0] * 255.0f);
+    const float invStdG = 1.0f / (kStd[1] * 255.0f);
+    const float invStdB = 1.0f / (kStd[2] * 255.0f);
+    const float meanR = kMean[0];
+    const float meanG = kMean[1];
+    const float meanB = kMean[2];
     for (int y = 0; y < H; ++y) {
         const uchar* row = detInput.constScanLine(y);
+        const size_t base = size_t(y) * size_t(W);
         for (int x = 0; x < W; ++x) {
             const uchar* px = row + size_t(x) * 3u;  // [R,G,B]
-            for (int c = 0; c < 3; ++c) {
-                const float v = (px[2 - c] / 255.0f - kMean[c]) / kStd[c];
-                data[size_t(c) * size_t(H) * size_t(W)
-                     + size_t(y) * size_t(W) + size_t(x)] = v;
-            }
+            // BGR の C 順 (PP-OCR 規約: B が channel 0, R が channel 2)。
+            planeB[base + x] = (float(px[2]) * invStdB) - (meanB / kStd[2]);
+            planeG[base + x] = (float(px[1]) * invStdG) - (meanG / kStd[1]);
+            planeR[base + x] = (float(px[0]) * invStdR) - (meanR / kStd[0]);
         }
     }
     std::vector<int64_t> shape = {1, 3, H, W};
@@ -388,7 +416,7 @@ std::vector<QRect> Ocr::Impl::runDet(const QImage& detInput) {
     for (int y = 0; y < oH; ++y) {
         uchar* row = bin.scanLine(y);
         for (int x = 0; x < oW; ++x) {
-            row[x] = (outData[size_t(y) * size_t(oW) + size_t(x)] > 0.3f) ? 255 : 0;
+            row[x] = (outData[size_t(y) * size_t(oW) + size_t(x)] > kDetBinThresh) ? 255 : 0;
         }
     }
 
@@ -405,26 +433,31 @@ std::vector<QRect> Ocr::Impl::runDet(const QImage& detInput) {
 QString Ocr::Impl::runRec(const QImage& region) {
     if (region.width() < 2 || region.height() < 2) return {};
     const int targetH = recInputH;
-    int targetW = std::max(16, int(qreal(region.width()) * targetH / region.height()));
-    targetW = ((targetW + 7) / 8) * 8;
-    if (targetW < 16) targetW = 16;
-    if (targetW > 800) targetW = 800;
+    int targetW = std::max(kRecMinWidth,
+        int(qreal(region.width()) * targetH / region.height()));
+    targetW = ((targetW + kRecWidthStep - 1) / kRecWidthStep) * kRecWidthStep;
+    targetW = std::clamp(targetW, kRecMinWidth, kRecMaxWidth);
 
     QImage scaled = region.convertToFormat(QImage::Format_RGB888)
                           .scaled(targetW, targetH,
                                   Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
     // PP-OCR は BGR 入力。QImage RGB888 を BGR に並べ替える。
-    std::vector<float> data(size_t(3) * size_t(targetH) * size_t(targetW));
+    // 正規化は (x/255 - 0.5)/0.5 = x/127.5 - 1。CHW レイアウトを直接書き出す。
+    const size_t planeSize = size_t(targetH) * size_t(targetW);
+    std::vector<float> data(3 * planeSize);
+    float* const planeB = data.data();
+    float* const planeG = data.data() + planeSize;
+    float* const planeR = data.data() + 2 * planeSize;
+    constexpr float kInv = 1.0f / 127.5f;
     for (int y = 0; y < targetH; ++y) {
         const uchar* row = scaled.constScanLine(y);
+        const size_t base = size_t(y) * size_t(targetW);
         for (int x = 0; x < targetW; ++x) {
             const uchar* px = row + size_t(x) * 3u;  // [R,G,B]
-            for (int c = 0; c < 3; ++c) {
-                const float v = (px[2 - c] / 255.0f - 0.5f) / 0.5f;
-                data[size_t(c) * size_t(targetH) * size_t(targetW)
-                     + size_t(y) * size_t(targetW) + size_t(x)] = v;
-            }
+            planeB[base + x] = float(px[2]) * kInv - 1.0f;
+            planeG[base + x] = float(px[1]) * kInv - 1.0f;
+            planeR[base + x] = float(px[0]) * kInv - 1.0f;
         }
     }
     std::vector<int64_t> shape = {1, 3, targetH, targetW};
@@ -457,15 +490,16 @@ QString Ocr::Impl::recognizeImpl(const QImage& srcIn, const ProgressCb& cb) {
     const int oH = src.height();
     if (oW < 8 || oH < 8) return {};
 
-    // 入力リサイズ: 32 の倍数、min 320 / max 1280。短辺基準でアップスケール許容。
-    const int shortSide = 736;
-    const qreal ratio = qreal(shortSide) / qreal(std::min(oW, oH));
-    auto roundTo32 = [](int v) {
-        v = std::max(32, ((v + 16) / 32) * 32);
+    // 入力リサイズ: kDetSizeStep の倍数、上限 kDetSizeMax。短辺を kDetShortSide
+    // にスケール（アップスケールも許容）。
+    const qreal ratio = qreal(kDetShortSide) / qreal(std::min(oW, oH));
+    auto roundToStep = [](int v) {
+        v = std::max(kDetSizeStep,
+            ((v + kDetSizeStep / 2) / kDetSizeStep) * kDetSizeStep);
         return v;
     };
-    int dW = std::min(1280, roundTo32(int(std::round(oW * ratio))));
-    int dH = std::min(1280, roundTo32(int(std::round(oH * ratio))));
+    int dW = std::min(kDetSizeMax, roundToStep(int(std::round(oW * ratio))));
+    int dH = std::min(kDetSizeMax, roundToStep(int(std::round(oH * ratio))));
 
     QImage detInput = src.scaled(dW, dH, Qt::IgnoreAspectRatio,
                                  Qt::SmoothTransformation);
@@ -484,8 +518,8 @@ QString Ocr::Impl::recognizeImpl(const QImage& srcIn, const ProgressCb& cb) {
         int y = int(std::floor(r.y()      * sy));
         int w = int(std::ceil (r.width()  * sx));
         int h = int(std::ceil (r.height() * sy));
-        const int padX = std::max(2, int(w * 0.10));
-        const int padY = std::max(2, int(h * 0.30));
+        const int padX = std::max(kUnclipPadMin, int(w * kUnclipRatioX));
+        const int padY = std::max(kUnclipPadMin, int(h * kUnclipRatioY));
         x = std::max(0, x - padX);
         y = std::max(0, y - padY);
         w = std::min(oW - x, w + padX * 2);
@@ -518,7 +552,7 @@ QString Ocr::Impl::recognizeImpl(const QImage& srcIn, const ProgressCb& cb) {
         if (text.isEmpty()) continue;
 
         if (lineY < -10000 ||
-            std::abs(r.y() - lineY) > std::max(8, lineH / 2)) {
+            std::abs(r.y() - lineY) > std::max(kRowYToleranceMin, lineH / 2)) {
             if (!currentLine.isEmpty()) {
                 lines << currentLine.join(QStringLiteral(" "));
                 currentLine.clear();
